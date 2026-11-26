@@ -1,0 +1,158 @@
+# Demonstração do Docker em Linux (Ubuntu), Windows e macOS
+# e de um cluster Kubernetes com 3 nós (1 control-plane + 2 workers).
+name: Docker e Kubernetes - 3 sistemas operacionais
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ------------------------------------------------------------ LINUX (UBUNTU)
+  docker-linux:
+    name: Docker no Linux (Ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Instalação oficial do Docker em um Ubuntu limpo (repositório apt)
+        run: |
+          docker run --rm ubuntu:24.04 bash -c '
+            set -e
+            export DEBIAN_FRONTEND=noninteractive
+            echo "==> 1. Atualizar pacotes e instalar pré-requisitos"
+            apt-get update -qq && apt-get install -y -qq ca-certificates curl > /dev/null
+            echo "==> 2. Adicionar a chave GPG oficial do Docker"
+            install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+            chmod a+r /etc/apt/keyrings/docker.asc
+            echo "==> 3. Adicionar o repositório do Docker ao apt"
+            . /etc/os-release
+            printf "Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: %s\nComponents: stable\nArchitectures: %s\nSigned-By: /etc/apt/keyrings/docker.asc\n" "${UBUNTU_CODENAME:-$VERSION_CODENAME}" "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/docker.sources
+            cat /etc/apt/sources.list.d/docker.sources
+            echo "==> 4. Instalar os pacotes do Docker"
+            apt-get update -qq && apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin > /dev/null
+            echo "==> 5. Conferir as versões instaladas"
+            docker --version
+            docker compose version
+            containerd --version
+          '
+
+      - name: Docker Engine do Ubuntu em funcionamento
+        run: |
+          docker version
+          docker run --rm hello-world
+
+      - name: "Imagem do Docker Hub: nginx (pull e inspeção)"
+        run: |
+          docker pull nginx:1.27-alpine
+          docker images nginx
+          docker image inspect nginx:1.27-alpine --format 'Sistema: {{.Os}}/{{.Architecture}} | Porta exposta: {{json .Config.ExposedPorts}}'
+
+      - name: "Executar o container nginx com a página da plataforma EAD"
+        run: |
+          docker run -d --name meu-nginx -p 8080:80 -v "$PWD/site:/usr/share/nginx/html:ro" nginx:1.27-alpine
+          sleep 3
+          docker ps --filter name=meu-nginx
+          echo "==> Resposta do servidor em http://localhost:8080"
+          curl -s http://localhost:8080
+          echo "==> Logs do container"
+          docker logs meu-nginx
+          docker stop meu-nginx && docker rm meu-nginx
+
+  # ------------------------------------------------------------------ WINDOWS
+  docker-windows:
+    name: Docker no Windows
+    runs-on: windows-2022
+    steps:
+      - name: Versão do Windows
+        shell: pwsh
+        run: Get-ComputerInfo -Property WindowsProductName, OsVersion, OsArchitecture
+
+      - name: Docker Engine no Windows
+        shell: pwsh
+        run: |
+          docker version
+          docker info --format "Sistema do daemon: {{.OSType}} | Containers: {{.Containers}} | Imagens: {{.Images}}"
+
+      - name: Executar a imagem hello-world do Docker Hub (container Windows)
+        shell: pwsh
+        run: |
+          docker run --rm hello-world
+          docker images hello-world
+
+  # -------------------------------------------------------------------- MACOS
+  docker-macos:
+    name: Docker no macOS
+    runs-on: macos-latest
+    steps:
+      - name: Versão do macOS e do processador
+        run: |
+          sw_vers
+          uname -m
+
+      - name: Instalar o Docker CLI com o Homebrew
+        run: |
+          brew install docker docker-compose
+          docker --version
+          docker compose version || docker-compose --version
+
+      - name: Por que o daemon precisa de uma máquina virtual no macOS
+        run: |
+          echo "O Docker usa recursos do kernel Linux (namespaces e cgroups)."
+          echo "O macOS não tem kernel Linux, então o Docker Desktop roda o daemon dentro de uma VM leve."
+          echo "Este runner do GitHub (Apple Silicon) não permite virtualização aninhada, por isso só o cliente é instalado aqui:"
+          docker info 2>&1 | head -n 5 || true
+
+  # --------------------------------------------------------------- KUBERNETES
+  kubernetes:
+    name: Cluster Kubernetes com 3 nós (kind)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Instalar o kind e conferir o kubectl
+        run: |
+          curl -sLo ./kind https://kind.sigs.k8s.io/dl/v0.33.0/kind-linux-amd64
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+          kind version
+          kubectl version --client
+
+      - name: Criar o cluster com 3 nós
+        run: |
+          cat k8s/kind-3-nos.yaml
+          kind create cluster --config k8s/kind-3-nos.yaml --wait 180s
+
+      - name: Conferir os 3 nós
+        run: |
+          kubectl cluster-info
+          kubectl get nodes -o wide
+          echo "==> Cada nó do kind é um container Docker:"
+          docker ps --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+
+      - name: Implantar o NGINX (Deployment com 3 réplicas + Service)
+        run: |
+          kubectl apply -f k8s/nginx-deployment.yaml
+          kubectl apply -f k8s/nginx-service.yaml
+          kubectl rollout status deployment/nginx-deployment --timeout=180s
+          kubectl get deployments
+          kubectl get pods -o wide
+          kubectl get services
+
+      - name: Testar o acesso pelo Service
+        run: |
+          kubectl port-forward service/nginx-service 8080:80 > /dev/null 2>&1 &
+          sleep 5
+          curl -s http://localhost:8080 | grep -o "<title>.*</title>"
+
+      - name: Escalar para 5 réplicas
+        run: |
+          kubectl scale deployment nginx-deployment --replicas=5
+          kubectl rollout status deployment/nginx-deployment --timeout=180s
+          kubectl get pods -o wide
+
+      - name: Remover o cluster
+        if: always()
+        run: kind delete cluster --name cluster-3-nos
