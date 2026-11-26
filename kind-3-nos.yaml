@@ -1,0 +1,9 @@
+# Cluster Kubernetes com 3 nós criado pelo kind (Kubernetes IN Docker).
+# Cada nó é um container Docker rodando os componentes do Kubernetes.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: cluster-3-nos
+nodes:
+  - role: control-plane   # nó 1: plano de controle (API server, scheduler, etcd)
+  - role: worker          # nó 2: executa os pods da aplicação
+  - role: worker          # nó 3: executa os pods da aplicação
